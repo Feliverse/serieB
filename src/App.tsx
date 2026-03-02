@@ -9,6 +9,17 @@ type ValidationResult = {
   inRange: boolean
 }
 
+const OCR_DIGIT_MAP: Record<string, string> = {
+  O: '0',
+  Q: '0',
+  D: '0',
+  I: '1',
+  L: '1',
+  Z: '2',
+  S: '5',
+  B: '8',
+}
+
 const INVALID_RANGES: Record<Denomination, Array<[number, number]>> = {
   Bs50: [
     [67250001, 67700000],
@@ -56,14 +67,121 @@ const INVALID_RANGES: Record<Denomination, Array<[number, number]>> = {
   ],
 }
 
+function normalizeOcrToken(value: string): string {
+  return value
+    .toUpperCase()
+    .replace(/[OQDILZSB]/g, (char) => OCR_DIGIT_MAP[char] ?? char)
+    .replace(/\D/g, '')
+}
+
 function extractSerialCandidates(text: string): string[] {
-  const broadMatches = text.match(/\d[\d\s.,-]{6,14}\d/g) ?? []
-  const directMatches = text.match(/\d{8,9}/g) ?? []
+  const normalizedText = text.toUpperCase()
+  const broadMatches = normalizedText.match(/[0-9OQDILZSB][0-9OQDILZSB\s.,-]{6,16}[0-9OQDILZSB]/g) ?? []
+  const directMatches = normalizedText.match(/[0-9OQDILZSB]{8,10}/g) ?? []
   const cleaned = [...broadMatches, ...directMatches]
-    .map((value) => value.replace(/\D/g, ''))
+    .map(normalizeOcrToken)
     .filter((value) => value.length >= 8 && value.length <= 9)
 
   return Array.from(new Set(cleaned)).sort((a, b) => b.length - a.length)
+}
+
+async function loadImageFromDataUrl(imageDataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('No se pudo cargar la imagen'))
+    image.src = imageDataUrl
+  })
+}
+
+function createContrastVariant(image: HTMLImageElement, threshold: number): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = image.width * 2
+  canvas.height = image.height * 2
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    return image.src
+  }
+
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+  const pixels = imageData.data
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const red = pixels[index]
+    const green = pixels[index + 1]
+    const blue = pixels[index + 2]
+    const gray = 0.299 * red + 0.587 * green + 0.114 * blue
+    const value = gray > threshold ? 255 : 0
+
+    pixels[index] = value
+    pixels[index + 1] = value
+    pixels[index + 2] = value
+  }
+
+  context.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+async function createOcrVariants(imageDataUrl: string): Promise<string[]> {
+  const image = await loadImageFromDataUrl(imageDataUrl)
+  const variants = [imageDataUrl, createContrastVariant(image, 145), createContrastVariant(image, 170)]
+
+  return Array.from(new Set(variants))
+}
+
+async function createSerialBandSources(imageDataUrl: string): Promise<string[]> {
+  const image = await loadImageFromDataUrl(imageDataUrl)
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    return [imageDataUrl]
+  }
+
+  const xPct = 0.08
+  const wPct = 0.84
+  const hPct = 0.2
+  const centerYPcts = [0.42, 0.48, 0.54, 0.6]
+  const variants: string[] = []
+
+  for (const centerYPct of centerYPcts) {
+    const startYPct = Math.max(0, Math.min(1 - hPct, centerYPct - hPct / 2))
+
+    const sx = Math.floor(image.width * xPct)
+    const sy = Math.floor(image.height * startYPct)
+    const sw = Math.floor(image.width * wPct)
+    const sh = Math.floor(image.height * hPct)
+
+    canvas.width = sw
+    canvas.height = sh
+    context.clearRect(0, 0, sw, sh)
+    context.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh)
+    variants.push(canvas.toDataURL('image/jpeg', 0.92))
+  }
+
+  return Array.from(new Set(variants))
+}
+
+function selectBestSerial(textBlocks: string[]): string {
+  const scoreMap = new Map<string, number>()
+
+  for (const text of textBlocks) {
+    const candidates = extractSerialCandidates(text)
+
+    candidates.forEach((candidate, index) => {
+      const { inRange } = validateSerialInRanges(Number(candidate))
+      const rankBoost = index === 0 ? 2 : 1
+      const rangeBoost = inRange ? 4 : 0
+      const lengthBoost = candidate.length === 9 ? 0.4 : 0
+      const current = scoreMap.get(candidate) ?? 0
+
+      scoreMap.set(candidate, current + rankBoost + rangeBoost + lengthBoost)
+    })
+  }
+
+  return [...scoreMap.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
 }
 
 function validateSerialInRanges(serialNumber: number): ValidationResult {
@@ -126,8 +244,11 @@ function App() {
     setCameraReady(false)
   }
 
-  const applyDetectionResult = (text: string) => {
-    const candidates = extractSerialCandidates(text)
+  const applyDetectionResult = (text: string, preferredSerial?: string) => {
+    const extractedCandidates = extractSerialCandidates(text)
+    const candidates = preferredSerial
+      ? [preferredSerial, ...extractedCandidates.filter((value) => value !== preferredSerial)]
+      : extractedCandidates
 
     if (!candidates.length) {
       setSerialDetected('')
@@ -159,30 +280,57 @@ function App() {
   }
 
   const analyzeImageByOcr = async (
-    primaryImageDataUrl: string,
-    fallbackImageDataUrl?: string,
+    primaryImageDataUrls: string[] | string,
+    fallbackImageDataUrls?: string[] | string,
   ) => {
-    const primaryResult = await Tesseract.recognize(primaryImageDataUrl, 'eng', {
-      logger: (message) => {
-        if (
-          message.status === 'recognizing text' &&
-          typeof message.progress === 'number'
-        ) {
-          setProgress(Math.round(message.progress * 100))
-        }
-      },
-    })
+    const textBlocks: string[] = []
+    const primarySources = Array.isArray(primaryImageDataUrls)
+      ? primaryImageDataUrls
+      : [primaryImageDataUrls]
 
-    let textForDetection = primaryResult.data.text ?? ''
-    let candidates = extractSerialCandidates(textForDetection)
+    for (let sourceIndex = 0; sourceIndex < primarySources.length; sourceIndex += 1) {
+      const source = primarySources[sourceIndex]
+      const sourceVariants = await createOcrVariants(source)
 
-    if (!candidates.length && fallbackImageDataUrl) {
-      const fallbackResult = await Tesseract.recognize(fallbackImageDataUrl, 'eng')
-      textForDetection = fallbackResult.data.text ?? ''
-      candidates = extractSerialCandidates(textForDetection)
+      for (let variantIndex = 0; variantIndex < sourceVariants.length; variantIndex += 1) {
+        const variant = sourceVariants[variantIndex]
+        const result = await Tesseract.recognize(variant, 'eng', {
+          logger: (message) => {
+            if (
+              sourceIndex === 0 &&
+              variantIndex === 0 &&
+              message.status === 'recognizing text' &&
+              typeof message.progress === 'number'
+            ) {
+              setProgress(Math.round(message.progress * 100))
+            }
+          },
+        })
+
+        textBlocks.push(result.data.text ?? '')
+      }
     }
 
-    applyDetectionResult(textForDetection)
+    let selectedSerial = selectBestSerial(textBlocks)
+
+    if (!selectedSerial && fallbackImageDataUrls) {
+      const fallbackSources = Array.isArray(fallbackImageDataUrls)
+        ? fallbackImageDataUrls
+        : [fallbackImageDataUrls]
+
+      for (const fallbackSource of fallbackSources) {
+        const fallbackVariants = await createOcrVariants(fallbackSource)
+
+        for (const variant of fallbackVariants) {
+          const fallbackResult = await Tesseract.recognize(variant, 'eng')
+          textBlocks.push(fallbackResult.data.text ?? '')
+        }
+      }
+
+      selectedSerial = selectBestSerial(textBlocks)
+    }
+
+    applyDetectionResult(textBlocks.join('\n'), selectedSerial)
   }
 
   const startCamera = async () => {
@@ -252,7 +400,7 @@ function App() {
       context.drawImage(video, 0, 0, sourceWidth, sourceHeight)
       const fullImageDataUrl = canvas.toDataURL('image/jpeg', 0.9)
 
-      await analyzeImageByOcr(regionImageDataUrl, fullImageDataUrl)
+      await analyzeImageByOcr([regionImageDataUrl], [fullImageDataUrl])
     } catch {
       setError('Falló el OCR. Intenta una foto más estable y con buena iluminación.')
     } finally {
@@ -287,7 +435,8 @@ function App() {
         reader.readAsDataURL(file)
       })
 
-      await analyzeImageByOcr(imageDataUrl)
+      const serialBandSources = await createSerialBandSources(imageDataUrl)
+      await analyzeImageByOcr(serialBandSources, [imageDataUrl])
     } catch {
       setError('No se pudo analizar la imagen seleccionada.')
     } finally {
