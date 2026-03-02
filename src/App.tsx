@@ -3,6 +3,7 @@ import Tesseract from 'tesseract.js'
 import './App.css'
 
 type Denomination = 'Bs10' | 'Bs20' | 'Bs50'
+type PrecisionMode = 'fast' | 'high'
 
 type ValidationResult = {
   denomination: Denomination | null
@@ -124,14 +125,23 @@ function createContrastVariant(image: HTMLImageElement, threshold: number): stri
   return canvas.toDataURL('image/png')
 }
 
-async function createOcrVariants(imageDataUrl: string): Promise<string[]> {
+async function createOcrVariants(
+  imageDataUrl: string,
+  mode: PrecisionMode,
+): Promise<string[]> {
   const image = await loadImageFromDataUrl(imageDataUrl)
-  const variants = [imageDataUrl, createContrastVariant(image, 145), createContrastVariant(image, 170)]
+  const variants =
+    mode === 'fast'
+      ? [imageDataUrl, createContrastVariant(image, 160)]
+      : [imageDataUrl, createContrastVariant(image, 145), createContrastVariant(image, 170)]
 
   return Array.from(new Set(variants))
 }
 
-async function createSerialBandSources(imageDataUrl: string): Promise<string[]> {
+async function createSerialBandSources(
+  imageDataUrl: string,
+  mode: PrecisionMode,
+): Promise<string[]> {
   const image = await loadImageFromDataUrl(imageDataUrl)
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
@@ -143,7 +153,7 @@ async function createSerialBandSources(imageDataUrl: string): Promise<string[]> 
   const xPct = 0.08
   const wPct = 0.84
   const hPct = 0.2
-  const centerYPcts = [0.42, 0.48, 0.54, 0.6]
+  const centerYPcts = mode === 'fast' ? [0.48, 0.54] : [0.42, 0.48, 0.54, 0.6]
   const variants: string[] = []
 
   for (const centerYPct of centerYPcts) {
@@ -228,6 +238,7 @@ function App() {
   const [isSerieB, setIsSerieB] = useState(false)
   const [inRange, setInRange] = useState(false)
   const [denomination, setDenomination] = useState<Denomination | null>(null)
+  const [precisionMode, setPrecisionMode] = useState<PrecisionMode>('high')
 
   const guideRegion = {
     xPct: 0.12,
@@ -281,16 +292,19 @@ function App() {
 
   const analyzeImageByOcr = async (
     primaryImageDataUrls: string[] | string,
+    mode: PrecisionMode,
     fallbackImageDataUrls?: string[] | string,
   ) => {
     const textBlocks: string[] = []
-    const primarySources = Array.isArray(primaryImageDataUrls)
+    const primarySourcesRaw = Array.isArray(primaryImageDataUrls)
       ? primaryImageDataUrls
       : [primaryImageDataUrls]
+    const primarySources =
+      mode === 'fast' ? primarySourcesRaw.slice(0, 2) : primarySourcesRaw
 
     for (let sourceIndex = 0; sourceIndex < primarySources.length; sourceIndex += 1) {
       const source = primarySources[sourceIndex]
-      const sourceVariants = await createOcrVariants(source)
+      const sourceVariants = await createOcrVariants(source, mode)
 
       for (let variantIndex = 0; variantIndex < sourceVariants.length; variantIndex += 1) {
         const variant = sourceVariants[variantIndex]
@@ -314,12 +328,14 @@ function App() {
     let selectedSerial = selectBestSerial(textBlocks)
 
     if (!selectedSerial && fallbackImageDataUrls) {
-      const fallbackSources = Array.isArray(fallbackImageDataUrls)
+      const fallbackSourcesRaw = Array.isArray(fallbackImageDataUrls)
         ? fallbackImageDataUrls
         : [fallbackImageDataUrls]
+      const fallbackSources =
+        mode === 'fast' ? fallbackSourcesRaw.slice(0, 1) : fallbackSourcesRaw
 
       for (const fallbackSource of fallbackSources) {
-        const fallbackVariants = await createOcrVariants(fallbackSource)
+        const fallbackVariants = await createOcrVariants(fallbackSource, mode)
 
         for (const variant of fallbackVariants) {
           const fallbackResult = await Tesseract.recognize(variant, 'eng')
@@ -400,7 +416,7 @@ function App() {
       context.drawImage(video, 0, 0, sourceWidth, sourceHeight)
       const fullImageDataUrl = canvas.toDataURL('image/jpeg', 0.9)
 
-      await analyzeImageByOcr([regionImageDataUrl], [fullImageDataUrl])
+      await analyzeImageByOcr([regionImageDataUrl], precisionMode, [fullImageDataUrl])
     } catch {
       setError('Falló el OCR. Intenta una foto más estable y con buena iluminación.')
     } finally {
@@ -435,8 +451,8 @@ function App() {
         reader.readAsDataURL(file)
       })
 
-      const serialBandSources = await createSerialBandSources(imageDataUrl)
-      await analyzeImageByOcr(serialBandSources, [imageDataUrl])
+      const serialBandSources = await createSerialBandSources(imageDataUrl, precisionMode)
+      await analyzeImageByOcr(serialBandSources, precisionMode, [imageDataUrl])
     } catch {
       setError('No se pudo analizar la imagen seleccionada.')
     } finally {
@@ -466,6 +482,26 @@ function App() {
         <canvas ref={canvasRef} className="hidden-canvas" />
 
         <div className="actions">
+          <div className="precision-controls">
+            <span>Modo OCR:</span>
+            <button
+              className={precisionMode === 'fast' ? 'toggle active' : 'toggle secondary'}
+              onClick={() => setPrecisionMode('fast')}
+              disabled={isAnalyzing}
+              type="button"
+            >
+              Rápido
+            </button>
+            <button
+              className={precisionMode === 'high' ? 'toggle active' : 'toggle secondary'}
+              onClick={() => setPrecisionMode('high')}
+              disabled={isAnalyzing}
+              type="button"
+            >
+              Alta precisión
+            </button>
+          </div>
+
           <input
             ref={fileInputRef}
             type="file"

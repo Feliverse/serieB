@@ -70,6 +70,29 @@ h2 {
   gap: 0.5rem;
 }
 
+.precision-controls {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.2rem;
+}
+
+.precision-controls span {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+button.toggle {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+button.toggle.active {
+  background: #1f6feb;
+}
+
 button {
   border: none;
   border-radius: 10px;
