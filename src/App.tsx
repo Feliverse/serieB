@@ -21,6 +21,8 @@ const OCR_DIGIT_MAP: Record<string, string> = {
   B: '8',
 }
 
+const PRECISION_MODE_STORAGE_KEY = 'serieB.precisionMode'
+
 const INVALID_RANGES: Record<Denomination, Array<[number, number]>> = {
   Bs50: [
     [67250001, 67700000],
@@ -238,7 +240,14 @@ function App() {
   const [isSerieB, setIsSerieB] = useState(false)
   const [inRange, setInRange] = useState(false)
   const [denomination, setDenomination] = useState<Denomination | null>(null)
-  const [precisionMode, setPrecisionMode] = useState<PrecisionMode>('high')
+  const [precisionMode, setPrecisionMode] = useState<PrecisionMode>(() => {
+    try {
+      const savedMode = localStorage.getItem(PRECISION_MODE_STORAGE_KEY)
+      return savedMode === 'fast' || savedMode === 'high' ? savedMode : 'high'
+    } catch {
+      return 'high'
+    }
+  })
 
   const guideRegion = {
     xPct: 0.12,
@@ -465,6 +474,14 @@ function App() {
       stopCamera()
     }
   }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PRECISION_MODE_STORAGE_KEY, precisionMode)
+    } catch {
+      return
+    }
+  }, [precisionMode])
 
   const isInvalidBill = isSerieB && inRange
 
