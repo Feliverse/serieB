@@ -22,6 +22,7 @@ const OCR_DIGIT_MAP: Record<string, string> = {
 }
 
 const PRECISION_MODE_STORAGE_KEY = 'serieB.precisionMode'
+const TERMS_ACCEPTED_STORAGE_KEY = 'serieB.termsAccepted'
 
 const INVALID_RANGES: Record<Denomination, Array<[number, number]>> = {
   Bs50: [
@@ -248,6 +249,14 @@ function App() {
       return 'high'
     }
   })
+  const [hasAcceptedTerms, setHasAcceptedTerms] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(TERMS_ACCEPTED_STORAGE_KEY) === 'true'
+    } catch {
+      return false
+    }
+  })
+  const [isTermsModalOpen, setIsTermsModalOpen] = useState(false)
 
   const guideRegion = {
     xPct: 0.12,
@@ -262,6 +271,15 @@ function App() {
       streamRef.current = null
     }
     setCameraReady(false)
+  }
+
+  const ensureTermsAccepted = () => {
+    if (hasAcceptedTerms) {
+      return true
+    }
+
+    setError('Debes aceptar los Términos y Condiciones antes de usar el análisis.')
+    return false
   }
 
   const applyDetectionResult = (text: string, preferredSerial?: string) => {
@@ -359,6 +377,10 @@ function App() {
   }
 
   const startCamera = async () => {
+    if (!ensureTermsAccepted()) {
+      return
+    }
+
     setError('')
 
     try {
@@ -383,6 +405,10 @@ function App() {
   }
 
   const captureAndAnalyze = async () => {
+    if (!ensureTermsAccepted()) {
+      return
+    }
+
     if (!videoRef.current || !canvasRef.current || isAnalyzing) {
       return
     }
@@ -434,6 +460,10 @@ function App() {
   }
 
   const openGalleryPicker = () => {
+    if (!ensureTermsAccepted()) {
+      return
+    }
+
     if (isAnalyzing) {
       return
     }
@@ -441,6 +471,10 @@ function App() {
   }
 
   const handleGallerySelection = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (!ensureTermsAccepted()) {
+      return
+    }
+
     const file = event.target.files?.[0]
     event.target.value = ''
 
@@ -483,13 +517,55 @@ function App() {
     }
   }, [precisionMode])
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(TERMS_ACCEPTED_STORAGE_KEY, String(hasAcceptedTerms))
+    } catch {
+      return
+    }
+  }, [hasAcceptedTerms])
+
   const isInvalidBill = isSerieB && inRange
+  const statusText = isInvalidBill
+    ? 'Billete Serie B en rango sin valor legal.'
+    : 'No cumple simultáneamente Serie B + rango publicado.'
+  const cameraStateText = cameraReady
+    ? 'Cámara activa. Alinea el número dentro del recuadro.'
+    : 'Cámara detenida. Puedes iniciar cámara o usar una foto.'
+  const termsFileUrl = `${import.meta.env.BASE_URL}terms-and-conditions.md`
 
   return (
     <main className="app">
-      <h1>Validador de Billetes Serie B</h1>
+      <header className="app-header">
+        <h1>Validador de Billetes Serie B</h1>
+        <p>
+          Detecta el número de serie con OCR y verifica si corresponde a Serie B y a los
+          rangos publicados.
+        </p>
+
+        <div className="terms-consent">
+          <label>
+            <input
+              type="checkbox"
+              checked={hasAcceptedTerms}
+              onChange={(event) => setHasAcceptedTerms(event.target.checked)}
+            />
+            He leído y acepto los Términos y Condiciones.
+          </label>
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => setIsTermsModalOpen(true)}
+          >
+            Leer términos (modal)
+          </button>
+        </div>
+      </header>
 
       <section className="camera-panel">
+        <h2>Captura</h2>
+        <p className="panel-hint">{cameraStateText}</p>
+
         <div className="camera-frame">
           <video ref={videoRef} className="camera" autoPlay playsInline muted />
           <div className="serial-guide" aria-hidden="true">
@@ -519,6 +595,12 @@ function App() {
             </button>
           </div>
 
+          <p className="mode-help">
+            {precisionMode === 'high'
+              ? 'Alta precisión: más análisis y mayor exactitud.'
+              : 'Rápido: resultado más veloz con menos pasadas OCR.'}
+          </p>
+
           <input
             ref={fileInputRef}
             type="file"
@@ -529,20 +611,30 @@ function App() {
 
           {!cameraReady ? (
             <>
-              <button onClick={startCamera}>Iniciar cámara</button>
-              <button onClick={openGalleryPicker} className="secondary" disabled={isAnalyzing}>
+              <button onClick={startCamera} disabled={!hasAcceptedTerms}>
+                Iniciar cámara
+              </button>
+              <button
+                onClick={openGalleryPicker}
+                className="secondary"
+                disabled={isAnalyzing || !hasAcceptedTerms}
+              >
                 Usar foto de galería
               </button>
             </>
           ) : (
             <>
-              <button onClick={captureAndAnalyze} disabled={isAnalyzing}>
+              <button onClick={captureAndAnalyze} disabled={isAnalyzing || !hasAcceptedTerms}>
                 {isAnalyzing ? `Analizando... ${progress}%` : 'Tomar foto y validar'}
               </button>
               <button onClick={stopCamera} className="secondary">
                 Detener cámara
               </button>
-              <button onClick={openGalleryPicker} className="secondary" disabled={isAnalyzing}>
+              <button
+                onClick={openGalleryPicker}
+                className="secondary"
+                disabled={isAnalyzing || !hasAcceptedTerms}
+              >
                 Usar foto de galería
               </button>
             </>
@@ -554,25 +646,51 @@ function App() {
 
       <section className="result-panel">
         <h2>Resultado</h2>
-        <p>
-          <strong>Número detectado:</strong> {serialDetected || 'No detectado'}
-        </p>
-        <p>
-          <strong>Serie B detectada:</strong> {isSerieB ? 'Sí' : 'No'}
-        </p>
-        <p>
-          <strong>En rango publicado:</strong> {inRange ? 'Sí' : 'No'}
-        </p>
-        <p>
-          <strong>Denominación en rango:</strong> {denomination ?? 'No coincide'}
-        </p>
+        <div className="result-grid">
+          <p>
+            <strong>Número detectado:</strong> {serialDetected || 'No detectado'}
+          </p>
+          <p>
+            <strong>Serie B detectada:</strong> {isSerieB ? 'Sí' : 'No'}
+          </p>
+          <p>
+            <strong>En rango publicado:</strong> {inRange ? 'Sí' : 'No'}
+          </p>
+          <p>
+            <strong>Denominación en rango:</strong> {denomination ?? 'No coincide'}
+          </p>
+        </div>
 
-        <p className={isInvalidBill ? 'status-bad' : 'status-ok'}>
-          {isInvalidBill
-            ? 'Billete Serie B en rango sin valor legal.'
-            : 'No cumple simultáneamente Serie B + rango publicado.'}
-        </p>
+        <p className={isInvalidBill ? 'status-bad' : 'status-ok'}>{statusText}</p>
       </section>
+
+      {isTermsModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsTermsModalOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h2>Términos y Condiciones</h2>
+            <p>
+              Esta app es una herramienta de apoyo y no reemplaza verificaciones oficiales.
+              El OCR puede fallar por iluminación, ángulo o calidad de imagen.
+            </p>
+            <p>
+              La decisión final sobre aceptación o rechazo de billetes es responsabilidad del
+              usuario.
+            </p>
+            <p>
+              Lee el documento completo aquí:{' '}
+              <a href={termsFileUrl} target="_blank" rel="noreferrer">
+                Abrir archivo de Términos y Condiciones
+              </a>
+            </p>
+
+            <div className="modal-actions">
+              <button type="button" onClick={() => setIsTermsModalOpen(false)}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
