@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import Tesseract from 'tesseract.js'
 import './App.css'
 
@@ -98,6 +98,7 @@ function detectSerieB(text: string): boolean {
 function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
 
   const [cameraReady, setCameraReady] = useState(false)
@@ -110,12 +111,78 @@ function App() {
   const [inRange, setInRange] = useState(false)
   const [denomination, setDenomination] = useState<Denomination | null>(null)
 
+  const guideRegion = {
+    xPct: 0.12,
+    yPct: 0.42,
+    wPct: 0.76,
+    hPct: 0.18,
+  }
+
   const stopCamera = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
     }
     setCameraReady(false)
+  }
+
+  const applyDetectionResult = (text: string) => {
+    const candidates = extractSerialCandidates(text)
+
+    if (!candidates.length) {
+      setSerialDetected('')
+      setDenomination(null)
+      setInRange(false)
+      setIsSerieB(detectSerieB(text))
+      setError('No se detectó un número de serie claro. Acerca más la cámara al serial.')
+      return
+    }
+
+    let selectedSerial = candidates[0]
+    let selectedValidation = validateSerialInRanges(Number(selectedSerial))
+
+    for (const candidate of candidates) {
+      const numericValue = Number(candidate)
+      const validation = validateSerialInRanges(numericValue)
+
+      if (validation.inRange) {
+        selectedSerial = candidate
+        selectedValidation = validation
+        break
+      }
+    }
+
+    setSerialDetected(selectedSerial)
+    setDenomination(selectedValidation.denomination)
+    setInRange(selectedValidation.inRange)
+    setIsSerieB(detectSerieB(text))
+  }
+
+  const analyzeImageByOcr = async (
+    primaryImageDataUrl: string,
+    fallbackImageDataUrl?: string,
+  ) => {
+    const primaryResult = await Tesseract.recognize(primaryImageDataUrl, 'eng', {
+      logger: (message) => {
+        if (
+          message.status === 'recognizing text' &&
+          typeof message.progress === 'number'
+        ) {
+          setProgress(Math.round(message.progress * 100))
+        }
+      },
+    })
+
+    let textForDetection = primaryResult.data.text ?? ''
+    let candidates = extractSerialCandidates(textForDetection)
+
+    if (!candidates.length && fallbackImageDataUrl) {
+      const fallbackResult = await Tesseract.recognize(fallbackImageDataUrl, 'eng')
+      textForDetection = fallbackResult.data.text ?? ''
+      candidates = extractSerialCandidates(textForDetection)
+    }
+
+    applyDetectionResult(textForDetection)
   }
 
   const startCamera = async () => {
@@ -166,55 +233,63 @@ function App() {
       return
     }
 
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    context.drawImage(video, 0, 0, canvas.width, canvas.height)
+    const sourceWidth = video.videoWidth
+    const sourceHeight = video.videoHeight
+    const sx = Math.floor(sourceWidth * guideRegion.xPct)
+    const sy = Math.floor(sourceHeight * guideRegion.yPct)
+    const sw = Math.floor(sourceWidth * guideRegion.wPct)
+    const sh = Math.floor(sourceHeight * guideRegion.hPct)
+
+    canvas.width = sw
+    canvas.height = sh
+    context.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh)
 
     try {
-      const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-      const result = await Tesseract.recognize(imageDataUrl, 'eng', {
-        logger: (message) => {
-          if (
-            message.status === 'recognizing text' &&
-            typeof message.progress === 'number'
-          ) {
-            setProgress(Math.round(message.progress * 100))
-          }
-        },
-      })
+      const regionImageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
 
-      const text = result.data.text ?? ''
-      const candidates = extractSerialCandidates(text)
+      canvas.width = sourceWidth
+      canvas.height = sourceHeight
+      context.drawImage(video, 0, 0, sourceWidth, sourceHeight)
+      const fullImageDataUrl = canvas.toDataURL('image/jpeg', 0.9)
 
-      if (!candidates.length) {
-        setSerialDetected('')
-        setDenomination(null)
-        setInRange(false)
-        setIsSerieB(detectSerieB(text))
-        setError('No se detectó un número de serie claro. Acerca más la cámara al serial.')
-        return
-      }
-
-      let selectedSerial = candidates[0]
-      let selectedValidation = validateSerialInRanges(Number(selectedSerial))
-
-      for (const candidate of candidates) {
-        const numericValue = Number(candidate)
-        const validation = validateSerialInRanges(numericValue)
-
-        if (validation.inRange) {
-          selectedSerial = candidate
-          selectedValidation = validation
-          break
-        }
-      }
-
-      setSerialDetected(selectedSerial)
-      setDenomination(selectedValidation.denomination)
-      setInRange(selectedValidation.inRange)
-      setIsSerieB(detectSerieB(text))
+      await analyzeImageByOcr(regionImageDataUrl, fullImageDataUrl)
     } catch {
       setError('Falló el OCR. Intenta una foto más estable y con buena iluminación.')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
+  const openGalleryPicker = () => {
+    if (isAnalyzing) {
+      return
+    }
+    fileInputRef.current?.click()
+  }
+
+  const handleGallerySelection = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+
+    if (!file || isAnalyzing) {
+      return
+    }
+
+    setError('')
+    setIsAnalyzing(true)
+    setProgress(0)
+
+    try {
+      const imageDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(new Error('No se pudo leer el archivo'))
+        reader.readAsDataURL(file)
+      })
+
+      await analyzeImageByOcr(imageDataUrl)
+    } catch {
+      setError('No se pudo analizar la imagen seleccionada.')
     } finally {
       setIsAnalyzing(false)
     }
@@ -233,12 +308,30 @@ function App() {
       <h1>Validador de Billetes Serie B</h1>
 
       <section className="camera-panel">
-        <video ref={videoRef} className="camera" autoPlay playsInline muted />
+        <div className="camera-frame">
+          <video ref={videoRef} className="camera" autoPlay playsInline muted />
+          <div className="serial-guide" aria-hidden="true">
+            <span>Enfoca aquí el número de serie</span>
+          </div>
+        </div>
         <canvas ref={canvasRef} className="hidden-canvas" />
 
         <div className="actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="file-input"
+            onChange={handleGallerySelection}
+          />
+
           {!cameraReady ? (
-            <button onClick={startCamera}>Iniciar cámara</button>
+            <>
+              <button onClick={startCamera}>Iniciar cámara</button>
+              <button onClick={openGalleryPicker} className="secondary" disabled={isAnalyzing}>
+                Usar foto de galería
+              </button>
+            </>
           ) : (
             <>
               <button onClick={captureAndAnalyze} disabled={isAnalyzing}>
@@ -246,6 +339,9 @@ function App() {
               </button>
               <button onClick={stopCamera} className="secondary">
                 Detener cámara
+              </button>
+              <button onClick={openGalleryPicker} className="secondary" disabled={isAnalyzing}>
+                Usar foto de galería
               </button>
             </>
           )}

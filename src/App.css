@@ -26,7 +26,40 @@ h2 {
   background: #111;
 }
 
+.camera-frame {
+  position: relative;
+}
+
+.serial-guide {
+  position: absolute;
+  left: 12%;
+  top: 42%;
+  width: 76%;
+  height: 18%;
+  border: 2px dashed #1f6feb;
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.serial-guide span {
+  margin-top: -1.8rem;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
 .hidden-canvas {
+  display: none;
+}
+
+.file-input {
   display: none;
 }
 
