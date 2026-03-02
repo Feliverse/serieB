@@ -10,6 +10,16 @@ type ValidationResult = {
   inRange: boolean
 }
 
+type ColorAnalysis = {
+  denomination: Denomination | null
+  confidence: number
+}
+
+type DenominationSignal = {
+  denomination: Denomination | null
+  confidence: number
+}
+
 const OCR_DIGIT_MAP: Record<string, string> = {
   O: '0',
   Q: '0',
@@ -89,6 +99,109 @@ function extractSerialCandidates(text: string): string[] {
   return Array.from(new Set(cleaned)).sort((a, b) => b.length - a.length)
 }
 
+function extractDenominationFromText(text: string): DenominationSignal {
+  const normalized = text.toUpperCase()
+  const explicitWithCurrency = normalized.match(
+    /(?:BS\s*|B\.?\s*S\.?\s*)(10|20|50)(?!\d)|(10|20|50)\s*(?:BS|BOLIVIANOS?)/,
+  )
+
+  if (explicitWithCurrency) {
+    const value = explicitWithCurrency[1] ?? explicitWithCurrency[2]
+    if (value === '10') return { denomination: 'Bs10', confidence: 1 }
+    if (value === '20') return { denomination: 'Bs20', confidence: 1 }
+    if (value === '50') return { denomination: 'Bs50', confidence: 1 }
+  }
+
+  if (normalized.includes('DIEZ')) {
+    return { denomination: 'Bs10', confidence: 0.75 }
+  }
+
+  if (normalized.includes('VEINTE')) {
+    return { denomination: 'Bs20', confidence: 0.75 }
+  }
+
+  if (normalized.includes('CINCUENTA')) {
+    return { denomination: 'Bs50', confidence: 0.8 }
+  }
+
+  const isolatedNumberMatch = normalized.match(/(?<!\d)(10|20|50)(?!\d)/)
+
+  if (!isolatedNumberMatch) {
+    return { denomination: null, confidence: 0 }
+  }
+
+  const isolatedValue = isolatedNumberMatch[1]
+
+  if (isolatedValue === '10') return { denomination: 'Bs10', confidence: 0.35 }
+  if (isolatedValue === '20') return { denomination: 'Bs20', confidence: 0.35 }
+  if (isolatedValue === '50') return { denomination: 'Bs50', confidence: 0.35 }
+
+  return { denomination: null, confidence: 0 }
+}
+
+function rgbToHsv(red: number, green: number, blue: number) {
+  const r = red / 255
+  const g = green / 255
+  const b = blue / 255
+
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+
+  let hue = 0
+  if (delta !== 0) {
+    if (max === r) hue = ((g - b) / delta) % 6
+    else if (max === g) hue = (b - r) / delta + 2
+    else hue = (r - g) / delta + 4
+  }
+
+  hue = Math.round(hue * 60)
+  if (hue < 0) hue += 360
+
+  const saturation = max === 0 ? 0 : delta / max
+  const value = max
+
+  return { hue, saturation, value }
+}
+
+function estimateFinalDenomination(
+  rangeDenomination: Denomination | null,
+  textSignal: DenominationSignal,
+  colorAnalysis?: ColorAnalysis,
+): { denomination: Denomination | null; confidence: number } {
+  const scores: Record<Denomination, number> = {
+    Bs10: 0,
+    Bs20: 0,
+    Bs50: 0,
+  }
+
+  if (rangeDenomination) {
+    scores[rangeDenomination] += 3
+  }
+
+  if (textSignal.denomination) {
+    scores[textSignal.denomination] += 2.2 * Math.max(0, Math.min(1, textSignal.confidence))
+  }
+
+  if (colorAnalysis?.denomination) {
+    scores[colorAnalysis.denomination] += Math.max(0, Math.min(1, colorAnalysis.confidence)) * 1.4
+  }
+
+  const sorted = (Object.entries(scores) as Array<[Denomination, number]>).sort(
+    (a, b) => b[1] - a[1],
+  )
+
+  const [bestDenomination, bestScore] = sorted[0]
+  const secondBestScore = sorted[1]?.[1] ?? 0
+
+  if (bestScore <= 0.35) {
+    return { denomination: null, confidence: 0 }
+  }
+
+  const confidence = Math.max(0.2, Math.min(1, (bestScore - secondBestScore + bestScore / 4) / 3.5))
+  return { denomination: bestDenomination, confidence }
+}
+
 async function loadImageFromDataUrl(imageDataUrl: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image()
@@ -139,6 +252,84 @@ async function createOcrVariants(
       : [imageDataUrl, createContrastVariant(image, 145), createContrastVariant(image, 170)]
 
   return Array.from(new Set(variants))
+}
+
+async function detectDenominationByColor(imageDataUrl: string): Promise<ColorAnalysis> {
+  const image = await loadImageFromDataUrl(imageDataUrl)
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    return { denomination: null, confidence: 0 }
+  }
+
+  const targetWidth = 220
+  const ratio = image.height / image.width
+  canvas.width = targetWidth
+  canvas.height = Math.max(120, Math.round(targetWidth * ratio))
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+  const pixels = imageData.data
+
+  const bucket: Record<Denomination, number> = {
+    Bs10: 0,
+    Bs20: 0,
+    Bs50: 0,
+  }
+
+  let totalWeight = 0
+
+  for (let index = 0; index < pixels.length; index += 12) {
+    const red = pixels[index]
+    const green = pixels[index + 1]
+    const blue = pixels[index + 2]
+    const { hue, saturation, value } = rgbToHsv(red, green, blue)
+
+    if (saturation < 0.12 || value < 0.12 || value > 0.95) {
+      continue
+    }
+
+    const weight = saturation * value
+
+    const isOrange = hue >= 14 && hue <= 46
+    const isGreen = hue >= 74 && hue <= 150
+    const isPurple = hue >= 260 || hue <= 338
+
+    if (isOrange) bucket.Bs10 += weight
+    if (isGreen) bucket.Bs20 += weight
+    if (isPurple) bucket.Bs50 += weight
+
+    totalWeight += weight
+  }
+
+  if (totalWeight <= 0) {
+    return { denomination: null, confidence: 0 }
+  }
+
+  const normalizedScores: Record<Denomination, number> = {
+    Bs10: bucket.Bs10 / totalWeight,
+    Bs20: bucket.Bs20 / totalWeight,
+    Bs50: bucket.Bs50 / totalWeight,
+  }
+
+  const sorted = (Object.entries(normalizedScores) as Array<[Denomination, number]>).sort(
+    (a, b) => b[1] - a[1],
+  )
+
+  const best = sorted[0]
+  const second = sorted[1]
+  const dominance = best[1] - (second?.[1] ?? 0)
+  const confidence = Math.max(0, Math.min(1, best[1] * 2.1 + dominance * 1.7))
+
+  if (confidence < 0.25) {
+    return { denomination: null, confidence }
+  }
+
+  return {
+    denomination: best[0],
+    confidence,
+  }
 }
 
 async function createSerialBandSources(
@@ -241,6 +432,11 @@ function App() {
   const [isSerieB, setIsSerieB] = useState(false)
   const [inRange, setInRange] = useState(false)
   const [denomination, setDenomination] = useState<Denomination | null>(null)
+  const [denominationByText, setDenominationByText] = useState<Denomination | null>(null)
+  const [denominationByColor, setDenominationByColor] = useState<Denomination | null>(null)
+  const [colorConfidence, setColorConfidence] = useState(0)
+  const [finalDenomination, setFinalDenomination] = useState<Denomination | null>(null)
+  const [finalConfidence, setFinalConfidence] = useState(0)
   const [precisionMode, setPrecisionMode] = useState<PrecisionMode>(() => {
     try {
       const savedMode = localStorage.getItem(PRECISION_MODE_STORAGE_KEY)
@@ -273,6 +469,20 @@ function App() {
     setCameraReady(false)
   }
 
+  const resetResults = () => {
+    setError('')
+    setSerialDetected('')
+    setIsSerieB(false)
+    setInRange(false)
+    setDenomination(null)
+    setDenominationByText(null)
+    setDenominationByColor(null)
+    setColorConfidence(0)
+    setFinalDenomination(null)
+    setFinalConfidence(0)
+    setProgress(0)
+  }
+
   const ensureTermsAccepted = () => {
     if (hasAcceptedTerms) {
       return true
@@ -282,17 +492,28 @@ function App() {
     return false
   }
 
-  const applyDetectionResult = (text: string, preferredSerial?: string) => {
+  const applyDetectionResult = (
+    text: string,
+    preferredSerial?: string,
+    colorAnalysis?: ColorAnalysis,
+  ) => {
     const extractedCandidates = extractSerialCandidates(text)
     const candidates = preferredSerial
       ? [preferredSerial, ...extractedCandidates.filter((value) => value !== preferredSerial)]
       : extractedCandidates
+    const textSignal = extractDenominationFromText(text)
+    setDenominationByText(textSignal.denomination)
+    setDenominationByColor(colorAnalysis?.denomination ?? null)
+    setColorConfidence(colorAnalysis?.confidence ?? 0)
 
     if (!candidates.length) {
       setSerialDetected('')
       setDenomination(null)
       setInRange(false)
       setIsSerieB(detectSerieB(text))
+      const estimated = estimateFinalDenomination(null, textSignal, colorAnalysis)
+      setFinalDenomination(estimated.denomination)
+      setFinalConfidence(estimated.confidence)
       setError('No se detectó un número de serie claro. Acerca más la cámara al serial.')
       return
     }
@@ -315,12 +536,20 @@ function App() {
     setDenomination(selectedValidation.denomination)
     setInRange(selectedValidation.inRange)
     setIsSerieB(detectSerieB(text))
+    const estimated = estimateFinalDenomination(
+      selectedValidation.denomination,
+      textSignal,
+      colorAnalysis,
+    )
+    setFinalDenomination(estimated.denomination)
+    setFinalConfidence(estimated.confidence)
   }
 
   const analyzeImageByOcr = async (
     primaryImageDataUrls: string[] | string,
     mode: PrecisionMode,
     fallbackImageDataUrls?: string[] | string,
+    colorAnalysis?: ColorAnalysis,
   ) => {
     const textBlocks: string[] = []
     const primarySourcesRaw = Array.isArray(primaryImageDataUrls)
@@ -373,7 +602,7 @@ function App() {
       selectedSerial = selectBestSerial(textBlocks)
     }
 
-    applyDetectionResult(textBlocks.join('\n'), selectedSerial)
+    applyDetectionResult(textBlocks.join('\n'), selectedSerial, colorAnalysis)
   }
 
   const startCamera = async () => {
@@ -450,8 +679,14 @@ function App() {
       canvas.height = sourceHeight
       context.drawImage(video, 0, 0, sourceWidth, sourceHeight)
       const fullImageDataUrl = canvas.toDataURL('image/jpeg', 0.9)
+      const colorAnalysis = await detectDenominationByColor(fullImageDataUrl)
 
-      await analyzeImageByOcr([regionImageDataUrl], precisionMode, [fullImageDataUrl])
+      await analyzeImageByOcr(
+        [regionImageDataUrl],
+        precisionMode,
+        [fullImageDataUrl],
+        colorAnalysis,
+      )
     } catch {
       setError('Falló el OCR. Intenta una foto más estable y con buena iluminación.')
     } finally {
@@ -495,7 +730,8 @@ function App() {
       })
 
       const serialBandSources = await createSerialBandSources(imageDataUrl, precisionMode)
-      await analyzeImageByOcr(serialBandSources, precisionMode, [imageDataUrl])
+      const colorAnalysis = await detectDenominationByColor(imageDataUrl)
+      await analyzeImageByOcr(serialBandSources, precisionMode, [imageDataUrl], colorAnalysis)
     } catch {
       setError('No se pudo analizar la imagen seleccionada.')
     } finally {
@@ -525,6 +761,21 @@ function App() {
     }
   }, [hasAcceptedTerms])
 
+  useEffect(() => {
+    if (!isTermsModalOpen) {
+      return
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsTermsModalOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isTermsModalOpen])
+
   const isInvalidBill = isSerieB && inRange
   const statusText = isInvalidBill
     ? 'Billete Serie B en rango sin valor legal.'
@@ -533,6 +784,12 @@ function App() {
     ? 'Cámara activa. Alinea el número dentro del recuadro.'
     : 'Cámara detenida. Puedes iniciar cámara o usar una foto.'
   const termsFileUrl = `${import.meta.env.BASE_URL}terms-and-conditions.md`
+  const hasAnyResult =
+    Boolean(serialDetected) ||
+    Boolean(denomination) ||
+    Boolean(denominationByText) ||
+    Boolean(denominationByColor) ||
+    Boolean(finalDenomination)
 
   return (
     <main className="app">
@@ -559,6 +816,16 @@ function App() {
           >
             Leer términos (modal)
           </button>
+        </div>
+
+        <div className="status-chips" aria-live="polite">
+          <span className={hasAcceptedTerms ? 'chip ok' : 'chip warn'}>
+            {hasAcceptedTerms ? 'Términos aceptados' : 'Pendiente aceptar términos'}
+          </span>
+          <span className={cameraReady ? 'chip ok' : 'chip neutral'}>
+            {cameraReady ? 'Cámara activa' : 'Cámara inactiva'}
+          </span>
+          <span className="chip neutral">Modo OCR: {precisionMode === 'high' ? 'Alta precisión' : 'Rápido'}</span>
         </div>
       </header>
 
@@ -642,6 +909,15 @@ function App() {
         </div>
 
         {error && <p className="error">{error}</p>}
+
+        {isAnalyzing && (
+          <div className="analysis-progress" role="status" aria-live="polite">
+            <p>Procesando imagen: {progress}%</p>
+            <div className="progress-track" aria-hidden="true">
+              <div className="progress-fill" style={{ width: `${progress}%` }} />
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="result-panel">
@@ -659,14 +935,46 @@ function App() {
           <p>
             <strong>Denominación en rango:</strong> {denomination ?? 'No coincide'}
           </p>
+          <p>
+            <strong>Denominación por OCR:</strong> {denominationByText ?? 'No detectada'}
+          </p>
+          <p>
+            <strong>Denominación por color:</strong>{' '}
+            {denominationByColor
+              ? `${denominationByColor} (${Math.round(colorConfidence * 100)}%)`
+              : 'No concluyente'}
+          </p>
+          <p>
+            <strong>Denominación final estimada:</strong>{' '}
+            {finalDenomination
+              ? `${finalDenomination} (${Math.round(finalConfidence * 100)}%)`
+              : 'No concluyente'}
+          </p>
         </div>
 
         <p className={isInvalidBill ? 'status-bad' : 'status-ok'}>{statusText}</p>
+
+        <div className="result-actions">
+          <button
+            type="button"
+            onClick={resetResults}
+            className="secondary"
+            disabled={!hasAnyResult && !error}
+          >
+            Limpiar resultado
+          </button>
+        </div>
       </section>
 
       {isTermsModalOpen && (
         <div className="modal-overlay" onClick={() => setIsTermsModalOpen(false)}>
-          <div className="modal" onClick={(event) => event.stopPropagation()}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Términos y Condiciones"
+            onClick={(event) => event.stopPropagation()}
+          >
             <h2>Términos y Condiciones</h2>
             <p>
               Esta app es una herramienta de apoyo y no reemplaza verificaciones oficiales.
