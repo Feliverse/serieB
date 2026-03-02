@@ -58,6 +58,20 @@ En GitHub:
 
 ---
 
+### Mini guía de estilo UI/UX
+
+Para mantener consistencia visual en futuras mejoras:
+
+1. **Prioridad de pantalla**: la cámara y los controles principales siempre arriba; información secundaria en acordeón o footer.
+2. **Jerarquía de acciones**: un control primario destacado (monitoreo) y controles secundarios compactos (cámara/galería).
+3. **Mensajes de estado**: cortos, directos y orientados a acción; evitar textos largos dentro del área de captura.
+4. **Chips/HUD**: mostrar solo estado crítico en overlay (Serie, Corte, Legalidad, Cámara); detalle técnico fuera del overlay.
+5. **Consistencia de botones**: mantener formas, radios, sombras y transiciones unificadas; usar íconos consistentes.
+6. **Accesibilidad**: todo botón debe tener `aria-label`/`title`; mantener contraste alto en chips y mensajes de error.
+7. **Responsive**: en móvil, priorizar controles y lectura rápida; evitar bloques anchos o múltiples filas innecesarias.
+
+---
+
 ### Términos y Condiciones
 
 Al usar esta aplicación, aceptas los siguientes términos:
@@ -121,6 +135,20 @@ In GitHub:
 - Go to **Settings** → **Pages**
 - In **Source**, choose **Deploy from a branch**
 - Select branch `gh-pages` and folder `/ (root)`
+
+---
+
+### Mini UI/UX style guide
+
+To keep visual consistency in future iterations:
+
+1. **Screen priority**: keep camera and primary controls at the top; move secondary info to accordion/footer.
+2. **Action hierarchy**: one prominent primary control (monitoring) plus compact secondary controls (camera/gallery).
+3. **Status messaging**: short, actionable feedback; avoid long text inside the capture area.
+4. **HUD/chips**: show only critical status in overlay (Serie, Denomination, Legality, Camera); keep technical detail outside overlay.
+5. **Button consistency**: keep shared shape/radius/shadow/transition rules; use a consistent icon set.
+6. **Accessibility**: all icon buttons need `aria-label`/`title`; preserve high contrast for chips and error messages.
+7. **Responsive behavior**: prioritize quick readability and controls on mobile; avoid wide multi-row control clutter.
 
 ---
 

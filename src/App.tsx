@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import Tesseract from 'tesseract.js'
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome'
+import {
+  faBolt,
+  faCamera,
+  faBullseye,
+  faImage,
+  faPause,
+  faPlay,
+  faStop,
+} from '@fortawesome/free-solid-svg-icons'
 import './App.css'
 
 type Denomination = 'Bs10' | 'Bs20' | 'Bs50'
@@ -550,6 +560,9 @@ function App() {
     }
   })
   const [isTermsModalOpen, setIsTermsModalOpen] = useState(false)
+  const [hasTriedAutoStart, setHasTriedAutoStart] = useState(false)
+  const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
+  const [isHudDimmed, setIsHudDimmed] = useState(false)
 
   const guideRegion = {
     xPct: 0.12,
@@ -564,6 +577,7 @@ function App() {
       streamRef.current = null
     }
     setCameraReady(false)
+    setWorkflowState('idle')
   }
 
   const resetResults = () => {
@@ -715,9 +729,9 @@ function App() {
     applyDetectionResult(textBlocks.join('\n'), selectedSerial, colorAnalysis)
   }
 
-  const startCamera = async () => {
+  const startCamera = async (): Promise<boolean> => {
     if (!ensureTermsAccepted()) {
-      return
+      return false
     }
 
     setError('')
@@ -738,8 +752,10 @@ function App() {
       }
 
       setCameraReady(true)
+      return true
     } catch {
       setError('No se pudo acceder a la cámara. Verifica permisos del navegador.')
+      return false
     }
   }
 
@@ -868,6 +884,33 @@ function App() {
     setProcessMessage('Monitoreo detenido por el usuario.')
   }
 
+  const toggleMonitoring = () => {
+    if (!cameraReady || !ensureTermsAccepted()) {
+      return
+    }
+
+    if (workflowState === 'monitoring') {
+      stopMonitoring()
+      return
+    }
+
+    startMonitoring()
+  }
+
+  const toggleCameraPower = async () => {
+    if (cameraReady) {
+      stopCamera()
+      setProcessMessage('Cámara detenida.')
+      return
+    }
+
+    const started = await startCamera()
+    if (started) {
+      setProcessMessage('Cámara iniciada. Monitoreo automático activo.')
+      setWorkflowState('monitoring')
+    }
+  }
+
   const completeWithDenomination = (chosenDenomination: Denomination) => {
     const serialNumber = Number(serialDetected)
 
@@ -940,6 +983,27 @@ function App() {
       stopCamera()
     }
   }, [])
+
+  useEffect(() => {
+    if (!hasEnteredApp || !hasAcceptedTerms || !hasCameraConsent || cameraReady || hasTriedAutoStart) {
+      return
+    }
+
+    setHasTriedAutoStart(true)
+    void (async () => {
+      const started = await startCamera()
+      if (started) {
+        setWorkflowState('monitoring')
+        setProcessMessage('Monitoreo automático activo. Presenta un billete frente a la cámara.')
+      }
+    })()
+  }, [
+    hasEnteredApp,
+    hasAcceptedTerms,
+    hasCameraConsent,
+    cameraReady,
+    hasTriedAutoStart,
+  ])
 
   useEffect(() => {
     if (workflowState !== 'monitoring' || !cameraReady || isAnalyzing) {
@@ -1045,13 +1109,38 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [isTermsModalOpen])
 
-  const isInvalidBill = isSerieB && inRange
-  const statusText = isInvalidBill
-    ? 'Billete Serie B en rango sin valor legal.'
-    : 'No cumple simultáneamente Serie B + rango publicado.'
-  const cameraStateText = cameraReady
-    ? 'Cámara activa. Alinea el número dentro del recuadro.'
-    : 'Cámara detenida. Puedes iniciar cámara o usar una foto.'
+  useEffect(() => {
+    const shouldKeepBright =
+      !cameraReady ||
+      isAnalyzing ||
+      workflowState === 'awaiting-confirmation' ||
+      isLegalBill === false ||
+      !hasAcceptedTerms ||
+      !hasCameraConsent
+
+    if (shouldKeepBright) {
+      setIsHudDimmed(false)
+      return
+    }
+
+    setIsHudDimmed(false)
+    const timeoutId = window.setTimeout(() => {
+      setIsHudDimmed(true)
+    }, 2600)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [
+    cameraReady,
+    isAnalyzing,
+    workflowState,
+    isLegalBill,
+    hasAcceptedTerms,
+    hasCameraConsent,
+    serialDetected,
+    finalDenomination,
+    processMessage,
+  ])
+
   const termsFileUrl = `${import.meta.env.BASE_URL}terms-and-conditions.md`
   const isCalibrationReady = {
     Bs10: calibration.consecutiveCorrect.Bs10 >= 2,
@@ -1064,95 +1153,61 @@ function App() {
     Boolean(denominationByText) ||
     Boolean(denominationByColor) ||
     Boolean(finalDenomination)
+  const serieChipText = serialDetected ? (isSerieB ? 'SERIE B' : 'NO SERIE B') : 'SIN LECTURA'
+  const denominationChipText = finalDenomination
+    ? `CORTE ${finalDenomination}`
+    : 'CORTE PENDIENTE'
+  const legalChipText =
+    isLegalBill === null ? 'LEGALIDAD PENDIENTE' : isLegalBill ? 'LEGAL' : 'SIN VALOR LEGAL'
+  const currentYear = new Date().getFullYear()
 
   return (
     <main className="app">
-      <header className="app-header">
-        <h1>Validador de Billetes Serie B</h1>
-        <p>
-          Detecta el número de serie con OCR y verifica si corresponde a Serie B y a los
-          rangos publicados.
-        </p>
-
-        <div className="terms-consent">
-          <label>
-            <input
-              type="checkbox"
-              checked={hasAcceptedTerms}
-              onChange={(event) => setHasAcceptedTerms(event.target.checked)}
-            />
-            He leído y acepto los Términos y Condiciones.
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={hasCameraConsent}
-              onChange={(event) => setHasCameraConsent(event.target.checked)}
-            />
-            Acepto el uso de cámara para análisis.
-          </label>
-          <button type="button" className="text-button" onClick={() => setIsTermsModalOpen(true)}>
-            Leer términos (modal)
-          </button>
-        </div>
-
-        <div className="status-chips" aria-live="polite">
-          <span className={hasAcceptedTerms ? 'chip ok' : 'chip warn'}>
-            {hasAcceptedTerms ? 'Términos aceptados' : 'Pendiente aceptar términos'}
-          </span>
-          <span className={cameraReady ? 'chip ok' : 'chip neutral'}>
-            {cameraReady ? 'Cámara activa' : 'Cámara inactiva'}
-          </span>
-          <span className="chip neutral">Modo OCR: {precisionMode === 'high' ? 'Alta precisión' : 'Rápido'}</span>
-          <span className={isCalibrationReady.Bs10 ? 'chip ok' : 'chip warn'}>
-            Calibración Bs10: {isCalibrationReady.Bs10 ? 'Lista' : `${calibration.consecutiveCorrect.Bs10}/2`}
-          </span>
-          <span className={isCalibrationReady.Bs20 ? 'chip ok' : 'chip warn'}>
-            Calibración Bs20: {isCalibrationReady.Bs20 ? 'Lista' : `${calibration.consecutiveCorrect.Bs20}/2`}
-          </span>
-          <span className={isCalibrationReady.Bs50 ? 'chip ok' : 'chip warn'}>
-            Calibración Bs50: {isCalibrationReady.Bs50 ? 'Lista' : `${calibration.consecutiveCorrect.Bs50}/2`}
-          </span>
-        </div>
-      </header>
-
       <section className="camera-panel">
-        <h2>Captura</h2>
-        <p className="panel-hint">{cameraStateText}</p>
-
         <div className="camera-frame">
           <video ref={videoRef} className="camera" autoPlay playsInline muted />
           <div className="serial-guide" aria-hidden="true">
-            <span>Enfoca aquí el número de serie</span>
+            <span>Aquí el número de serie</span>
+          </div>
+
+          <div className={`retro-hud ${isHudDimmed ? 'is-dimmed' : ''}`} aria-live="polite">
+            <span className={isSerieB ? 'hud-chip bad' : 'hud-chip neutral'}>{serieChipText}</span>
+            <span className="hud-chip neutral">{denominationChipText}</span>
+            <span className={isLegalBill === false ? 'hud-chip bad' : 'hud-chip ok'}>{legalChipText}</span>
+            <span className={cameraReady ? 'hud-chip ok' : 'hud-chip warn'}>
+              {cameraReady ? 'CAM ON' : 'CAM OFF'}
+            </span>
           </div>
         </div>
         <canvas ref={canvasRef} className="hidden-canvas" />
 
         <div className="actions">
-          <div className="precision-controls">
-            <span>Modo OCR:</span>
-            <button
-              className={precisionMode === 'fast' ? 'toggle active' : 'toggle secondary'}
-              onClick={() => setPrecisionMode('fast')}
-              disabled={isAnalyzing}
-              type="button"
-            >
-              Rápido
-            </button>
-            <button
-              className={precisionMode === 'high' ? 'toggle active' : 'toggle secondary'}
-              onClick={() => setPrecisionMode('high')}
-              disabled={isAnalyzing}
-              type="button"
-            >
-              Alta precisión
-            </button>
+          <div className="precision-controls modern" aria-label="Selector de modo OCR">
+            <span>Modo OCR</span>
+            <div className="mode-segmented" role="group" aria-label="Modo OCR">
+              <button
+                className={precisionMode === 'fast' ? 'mode-option is-active' : 'mode-option'}
+                onClick={() => setPrecisionMode('fast')}
+                disabled={isAnalyzing}
+                type="button"
+                title="Rápido: prioriza velocidad"
+              >
+                <FontAwesomeIcon icon={faBolt} className="mode-icon" /> Rápido
+              </button>
+              <button
+                className={precisionMode === 'high' ? 'mode-option is-active' : 'mode-option'}
+                onClick={() => setPrecisionMode('high')}
+                disabled={isAnalyzing}
+                type="button"
+                title="Alta precisión: más pasadas OCR"
+              >
+                <FontAwesomeIcon icon={faBullseye} className="mode-icon" /> Alta precisión
+              </button>
+            </div>
           </div>
 
-          <p className="mode-help">
-            {precisionMode === 'high'
-              ? 'Alta precisión: más análisis y mayor exactitud.'
-              : 'Rápido: resultado más veloz con menos pasadas OCR.'}
+          <p className="mode-help compact">
+            {precisionMode === 'high' ? '🎯 Más exactitud' : '⚡ Más velocidad'}
           </p>
 
           <input
@@ -1163,51 +1218,43 @@ function App() {
             onChange={handleGallerySelection}
           />
 
-          {!cameraReady ? (
-            <>
-              <button onClick={startCamera} disabled={!hasAcceptedTerms || !hasCameraConsent}>
-                Iniciar cámara
-              </button>
-              <button
-                onClick={openGalleryPicker}
-                className="secondary"
-                disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
-              >
-                Usar foto de galería
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                onClick={startMonitoring}
-                disabled={
-                  isAnalyzing ||
-                  !hasAcceptedTerms ||
-                  !hasCameraConsent ||
-                  workflowState === 'monitoring'
-                }
-              >
-                {workflowState === 'monitoring' ? `Monitoreando... ${progress}%` : 'Iniciar monitoreo automático'}
-              </button>
-              <button
-                onClick={stopMonitoring}
-                className="secondary"
-                disabled={workflowState !== 'monitoring'}
-              >
-                Detener monitoreo
-              </button>
-              <button onClick={stopCamera} className="secondary">
-                Detener cámara
-              </button>
-              <button
-                onClick={openGalleryPicker}
-                className="secondary"
-                disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
-              >
-                Usar foto de galería
-              </button>
-            </>
-          )}
+          <div className="control-deck">
+            <button
+              onClick={openGalleryPicker}
+              className="side-control gallery-control"
+              title="Usar foto de galería"
+              aria-label="Usar foto de galería"
+              disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
+            >
+              <FontAwesomeIcon icon={faImage} className="control-icon" />
+            </button>
+
+            <button
+              onClick={toggleMonitoring}
+              className={`main-control ${workflowState === 'monitoring' ? 'is-active' : ''}`}
+              title={workflowState === 'monitoring' ? 'Pausar monitoreo' : 'Iniciar monitoreo'}
+              aria-label={workflowState === 'monitoring' ? 'Pausar monitoreo' : 'Iniciar monitoreo'}
+              disabled={!cameraReady || isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
+            >
+              <FontAwesomeIcon
+                icon={workflowState === 'monitoring' ? faPause : faPlay}
+                className="control-icon"
+              />
+            </button>
+
+            <button
+              onClick={toggleCameraPower}
+              className={`side-control camera-control ${cameraReady ? 'is-on' : 'is-off'}`}
+              title={cameraReady ? 'Detener cámara' : 'Iniciar cámara'}
+              aria-label={cameraReady ? 'Detener cámara' : 'Iniciar cámara'}
+              disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
+            >
+              <FontAwesomeIcon
+                icon={cameraReady ? faStop : faCamera}
+                className="control-icon"
+              />
+            </button>
+          </div>
         </div>
 
         {error && <p className="error">{error}</p>}
@@ -1222,6 +1269,38 @@ function App() {
         )}
 
         {processMessage && <p className="process-message">{processMessage}</p>}
+
+        <details
+          className="analysis-details"
+          open={showAnalysisDetails}
+          onToggle={(event) => {
+            setShowAnalysisDetails((event.currentTarget as HTMLDetailsElement).open)
+          }}
+        >
+          <summary>Detalles de análisis</summary>
+          <div className="analysis-details-grid">
+            <span className="hud-chip neutral">
+              {hasAcceptedTerms && hasCameraConsent ? 'CONSENTIMIENTO OK' : 'FALTA CONSENTIMIENTO'}
+            </span>
+            <span className={inRange ? 'hud-chip bad' : 'hud-chip neutral'}>
+              {serialDetected ? (inRange ? 'SERIE EN RANGO' : 'SERIE FUERA RANGO') : 'RANGO PENDIENTE'}
+            </span>
+            <span className="hud-chip neutral">OCR {denominationByText ?? '-'}</span>
+            <span className="hud-chip neutral">
+              COLOR {denominationByColor ?? '-'} {denominationByColor ? `${Math.round(colorConfidence * 100)}%` : ''}
+            </span>
+            <span className={isCalibrationReady.Bs10 ? 'hud-chip ok' : 'hud-chip warn'}>
+              B10 {isCalibrationReady.Bs10 ? 'OK' : `${calibration.consecutiveCorrect.Bs10}/2`}
+            </span>
+            <span className={isCalibrationReady.Bs20 ? 'hud-chip ok' : 'hud-chip warn'}>
+              B20 {isCalibrationReady.Bs20 ? 'OK' : `${calibration.consecutiveCorrect.Bs20}/2`}
+            </span>
+            <span className={isCalibrationReady.Bs50 ? 'hud-chip ok' : 'hud-chip warn'}>
+              B50 {isCalibrationReady.Bs50 ? 'OK' : `${calibration.consecutiveCorrect.Bs50}/2`}
+            </span>
+            {confirmedDenomination && <span className="hud-chip ok">CONFIRMADO {confirmedDenomination}</span>}
+          </div>
+        </details>
 
         {workflowState === 'awaiting-confirmation' && finalDenomination && (
           <div className="confirm-box">
@@ -1255,58 +1334,33 @@ function App() {
         )}
       </section>
 
-      <section className="result-panel">
-        <h2>Resultado</h2>
-        <div className="result-grid">
-          <p>
-            <strong>Número detectado:</strong> {serialDetected || 'No detectado'}
-          </p>
-          <p>
-            <strong>Serie B detectada:</strong> {isSerieB ? 'Sí' : 'No'}
-          </p>
-          <p>
-            <strong>En rango publicado:</strong> {inRange ? 'Sí' : 'No'}
-          </p>
-          <p>
-            <strong>Denominación en rango:</strong> {denomination ?? 'No coincide'}
-          </p>
-          <p>
-            <strong>Denominación por OCR:</strong> {denominationByText ?? 'No detectada'}
-          </p>
-          <p>
-            <strong>Denominación por color:</strong>{' '}
-            {denominationByColor
-              ? `${denominationByColor} (${Math.round(colorConfidence * 100)}%)`
-              : 'No concluyente'}
-          </p>
-          <p>
-            <strong>Denominación final estimada:</strong>{' '}
-            {finalDenomination
-              ? `${finalDenomination} (${Math.round(finalConfidence * 100)}%)`
-              : 'No concluyente'}
-          </p>
-        </div>
+      <div className="compact-actions">
+        <button
+          type="button"
+          onClick={resetResults}
+          className="secondary"
+          disabled={!hasAnyResult && !error}
+        >
+          Limpiar resultado
+        </button>
+      </div>
 
-        <p className={isInvalidBill ? 'status-bad' : 'status-ok'}>{statusText}</p>
-
-        {confirmedDenomination && isLegalBill !== null && (
-          <p className={isLegalBill ? 'status-ok' : 'status-bad'}>
-            Validación final: {confirmedDenomination} Serie B{' '}
-            {isLegalBill ? 'legal (fuera de rangos)' : 'sin valor legal (dentro de rangos)'}.
-          </p>
-        )}
-
-        <div className="result-actions">
+      <footer className="app-footer">
+        <p>© {currentYear} Validador Serie B · Uso informativo</p>
+        <p>Herramienta de apoyo OCR; no reemplaza validación oficial.</p>
+        <div className="footer-links">
           <button
             type="button"
-            onClick={resetResults}
-            className="secondary"
-            disabled={!hasAnyResult && !error}
+            className="text-button"
+            onClick={() => setIsTermsModalOpen(true)}
           >
-            Limpiar resultado
+            Ver términos y condiciones
           </button>
+          <a href={termsFileUrl} target="_blank" rel="noreferrer">
+            Documento completo
+          </a>
         </div>
-      </section>
+      </footer>
 
       {isTermsModalOpen && (
         <div className="modal-overlay" onClick={() => setIsTermsModalOpen(false)}>
