@@ -1,42 +1,81 @@
-#root {
-  max-width: 1280px;
+.app {
+  width: min(900px, 100%);
   margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  display: grid;
+  gap: 1rem;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+h1,
+h2 {
+  margin: 0;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.camera-panel,
+.result-panel {
+  border: 1px solid #d0d7de;
+  border-radius: 12px;
+  padding: 1rem;
+  background: #fff;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+.camera {
+  width: 100%;
+  max-height: 420px;
+  object-fit: cover;
+  border-radius: 10px;
+  background: #111;
 }
 
-.card {
-  padding: 2em;
+.hidden-canvas {
+  display: none;
 }
 
-.read-the-docs {
-  color: #888;
+.actions {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 0.7rem 1rem;
+  background: #1f6feb;
+  color: #fff;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: #6e7781;
+}
+
+.error {
+  margin-top: 0.75rem;
+  color: #b42318;
+  font-weight: 600;
+}
+
+.status-ok,
+.status-bad {
+  margin: 0;
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.status-ok {
+  background: #ecfdf3;
+  color: #067647;
+}
+
+.status-bad {
+  background: #fef3f2;
+  color: #b42318;
 }
