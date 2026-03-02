@@ -20,6 +20,13 @@ type DenominationSignal = {
   confidence: number
 }
 
+type WorkflowState = 'idle' | 'monitoring' | 'awaiting-confirmation' | 'completed'
+
+type CalibrationState = {
+  consecutiveCorrect: Record<Denomination, number>
+  bias: Record<Denomination, number>
+}
+
 const OCR_DIGIT_MAP: Record<string, string> = {
   O: '0',
   Q: '0',
@@ -33,6 +40,22 @@ const OCR_DIGIT_MAP: Record<string, string> = {
 
 const PRECISION_MODE_STORAGE_KEY = 'serieB.precisionMode'
 const TERMS_ACCEPTED_STORAGE_KEY = 'serieB.termsAccepted'
+const CAMERA_CONSENT_STORAGE_KEY = 'serieB.cameraConsent'
+const ONBOARDING_DONE_STORAGE_KEY = 'serieB.onboardingDone'
+const CALIBRATION_STORAGE_KEY = 'serieB.calibrationState'
+
+const EMPTY_CALIBRATION: CalibrationState = {
+  consecutiveCorrect: {
+    Bs10: 0,
+    Bs20: 0,
+    Bs50: 0,
+  },
+  bias: {
+    Bs10: 0,
+    Bs20: 0,
+    Bs50: 0,
+  },
+}
 
 const INVALID_RANGES: Record<Denomination, Array<[number, number]>> = {
   Bs50: [
@@ -139,6 +162,25 @@ function extractDenominationFromText(text: string): DenominationSignal {
   return { denomination: null, confidence: 0 }
 }
 
+function detectUnsupportedDenominationFromText(text: string): string | null {
+  const normalized = text.toUpperCase()
+  const match = normalized.match(
+    /(?:BS\s*|B\.?\s*S\.?\s*)(\d{2,3})(?!\d)|(\d{2,3})\s*(?:BS|BOLIVIANOS?)/,
+  )
+
+  if (!match) {
+    return null
+  }
+
+  const rawValue = Number(match[1] ?? match[2])
+
+  if ([10, 20, 50].includes(rawValue)) {
+    return null
+  }
+
+  return String(rawValue)
+}
+
 function rgbToHsv(red: number, green: number, blue: number) {
   const r = red / 255
   const g = green / 255
@@ -167,6 +209,7 @@ function rgbToHsv(red: number, green: number, blue: number) {
 function estimateFinalDenomination(
   rangeDenomination: Denomination | null,
   textSignal: DenominationSignal,
+  calibrationBias: Record<Denomination, number>,
   colorAnalysis?: ColorAnalysis,
 ): { denomination: Denomination | null; confidence: number } {
   const scores: Record<Denomination, number> = {
@@ -187,6 +230,10 @@ function estimateFinalDenomination(
     scores[colorAnalysis.denomination] += Math.max(0, Math.min(1, colorAnalysis.confidence)) * 1.4
   }
 
+  scores.Bs10 += calibrationBias.Bs10
+  scores.Bs20 += calibrationBias.Bs20
+  scores.Bs50 += calibrationBias.Bs50
+
   const sorted = (Object.entries(scores) as Array<[Denomination, number]>).sort(
     (a, b) => b[1] - a[1],
   )
@@ -200,6 +247,12 @@ function estimateFinalDenomination(
 
   const confidence = Math.max(0.2, Math.min(1, (bestScore - secondBestScore + bestScore / 4) / 3.5))
   return { denomination: bestDenomination, confidence }
+}
+
+function isSerialInDenominationRange(serialNumber: number, denomination: Denomination): boolean {
+  return INVALID_RANGES[denomination].some(
+    ([from, to]) => serialNumber >= from && serialNumber <= to,
+  )
 }
 
 async function loadImageFromDataUrl(imageDataUrl: string): Promise<HTMLImageElement> {
@@ -437,6 +490,36 @@ function App() {
   const [colorConfidence, setColorConfidence] = useState(0)
   const [finalDenomination, setFinalDenomination] = useState<Denomination | null>(null)
   const [finalConfidence, setFinalConfidence] = useState(0)
+  const [unsupportedDenomination, setUnsupportedDenomination] = useState<string | null>(null)
+  const [workflowState, setWorkflowState] = useState<WorkflowState>('idle')
+  const [processMessage, setProcessMessage] = useState('')
+  const [confirmedDenomination, setConfirmedDenomination] = useState<Denomination | null>(null)
+  const [isLegalBill, setIsLegalBill] = useState<boolean | null>(null)
+  const [manualCorrection, setManualCorrection] = useState<Denomination>('Bs10')
+  const [calibration, setCalibration] = useState<CalibrationState>(() => {
+    try {
+      const saved = localStorage.getItem(CALIBRATION_STORAGE_KEY)
+      if (!saved) {
+        return EMPTY_CALIBRATION
+      }
+
+      const parsed = JSON.parse(saved) as CalibrationState
+      return {
+        consecutiveCorrect: {
+          Bs10: parsed.consecutiveCorrect?.Bs10 ?? 0,
+          Bs20: parsed.consecutiveCorrect?.Bs20 ?? 0,
+          Bs50: parsed.consecutiveCorrect?.Bs50 ?? 0,
+        },
+        bias: {
+          Bs10: parsed.bias?.Bs10 ?? 0,
+          Bs20: parsed.bias?.Bs20 ?? 0,
+          Bs50: parsed.bias?.Bs50 ?? 0,
+        },
+      }
+    } catch {
+      return EMPTY_CALIBRATION
+    }
+  })
   const [precisionMode, setPrecisionMode] = useState<PrecisionMode>(() => {
     try {
       const savedMode = localStorage.getItem(PRECISION_MODE_STORAGE_KEY)
@@ -448,6 +531,20 @@ function App() {
   const [hasAcceptedTerms, setHasAcceptedTerms] = useState<boolean>(() => {
     try {
       return localStorage.getItem(TERMS_ACCEPTED_STORAGE_KEY) === 'true'
+    } catch {
+      return false
+    }
+  })
+  const [hasCameraConsent, setHasCameraConsent] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(CAMERA_CONSENT_STORAGE_KEY) === 'true'
+    } catch {
+      return false
+    }
+  })
+  const [hasEnteredApp, setHasEnteredApp] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ONBOARDING_DONE_STORAGE_KEY) === 'true'
     } catch {
       return false
     }
@@ -480,15 +577,20 @@ function App() {
     setColorConfidence(0)
     setFinalDenomination(null)
     setFinalConfidence(0)
+    setUnsupportedDenomination(null)
+    setProcessMessage('')
+    setConfirmedDenomination(null)
+    setIsLegalBill(null)
     setProgress(0)
+    setWorkflowState(cameraReady ? 'idle' : 'idle')
   }
 
   const ensureTermsAccepted = () => {
-    if (hasAcceptedTerms) {
+    if (hasAcceptedTerms && hasCameraConsent) {
       return true
     }
 
-    setError('Debes aceptar los Términos y Condiciones antes de usar el análisis.')
+    setError('Debes aceptar Términos y uso de cámara antes de usar el análisis.')
     return false
   }
 
@@ -502,6 +604,8 @@ function App() {
       ? [preferredSerial, ...extractedCandidates.filter((value) => value !== preferredSerial)]
       : extractedCandidates
     const textSignal = extractDenominationFromText(text)
+    const unsupported = detectUnsupportedDenominationFromText(text)
+    setUnsupportedDenomination(unsupported)
     setDenominationByText(textSignal.denomination)
     setDenominationByColor(colorAnalysis?.denomination ?? null)
     setColorConfidence(colorAnalysis?.confidence ?? 0)
@@ -511,7 +615,12 @@ function App() {
       setDenomination(null)
       setInRange(false)
       setIsSerieB(detectSerieB(text))
-      const estimated = estimateFinalDenomination(null, textSignal, colorAnalysis)
+      const estimated = estimateFinalDenomination(
+        null,
+        textSignal,
+        calibration.bias,
+        colorAnalysis,
+      )
       setFinalDenomination(estimated.denomination)
       setFinalConfidence(estimated.confidence)
       setError('No se detectó un número de serie claro. Acerca más la cámara al serial.')
@@ -539,6 +648,7 @@ function App() {
     const estimated = estimateFinalDenomination(
       selectedValidation.denomination,
       textSignal,
+      calibration.bias,
       colorAnalysis,
     )
     setFinalDenomination(estimated.denomination)
@@ -739,11 +849,146 @@ function App() {
     }
   }
 
+  const startMonitoring = () => {
+    if (!cameraReady || !ensureTermsAccepted()) {
+      return
+    }
+
+    setError('')
+    setProcessMessage('Analizando billete automáticamente...')
+    setWorkflowState('monitoring')
+  }
+
+  const stopMonitoring = () => {
+    if (workflowState !== 'monitoring') {
+      return
+    }
+
+    setWorkflowState('idle')
+    setProcessMessage('Monitoreo detenido por el usuario.')
+  }
+
+  const completeWithDenomination = (chosenDenomination: Denomination) => {
+    const serialNumber = Number(serialDetected)
+
+    if (!serialDetected || Number.isNaN(serialNumber)) {
+      setProcessMessage('No se pudo validar el número de serie para el corte confirmado.')
+      setWorkflowState('completed')
+      return
+    }
+
+    const serialInRangeForCut = isSerialInDenominationRange(serialNumber, chosenDenomination)
+    const legal = !serialInRangeForCut
+
+    setConfirmedDenomination(chosenDenomination)
+    setIsLegalBill(legal)
+    setWorkflowState('completed')
+    setProcessMessage(
+      legal
+        ? `Billete ${chosenDenomination} Serie B legal (fuera de rangos observados).`
+        : `Billete ${chosenDenomination} Serie B sin valor legal (dentro de rangos observados).`,
+    )
+  }
+
+  const handleConfirmDenomination = (isCorrect: boolean) => {
+    if (!finalDenomination) {
+      setProcessMessage('No hay corte estimado para confirmar. Intenta otra captura.')
+      setWorkflowState('completed')
+      return
+    }
+
+    if (isCorrect) {
+      setCalibration((previous) => {
+        const nextCount = Math.min(2, previous.consecutiveCorrect[finalDenomination] + 1)
+        return {
+          ...previous,
+          consecutiveCorrect: {
+            ...previous.consecutiveCorrect,
+            [finalDenomination]: nextCount,
+          },
+        }
+      })
+
+      completeWithDenomination(finalDenomination)
+      return
+    }
+
+    const corrected = manualCorrection
+    setCalibration((previous) => {
+      const updatedBias = {
+        ...previous.bias,
+        [finalDenomination]: Math.max(-1.5, previous.bias[finalDenomination] - 0.45),
+        [corrected]: Math.min(1.5, previous.bias[corrected] + 0.45),
+      }
+
+      return {
+        bias: updatedBias,
+        consecutiveCorrect: {
+          ...previous.consecutiveCorrect,
+          [corrected]: 0,
+        },
+      }
+    })
+
+    setFinalDenomination(corrected)
+    setFinalConfidence(Math.max(0.45, finalConfidence * 0.8))
+    completeWithDenomination(corrected)
+  }
+
   useEffect(() => {
     return () => {
       stopCamera()
     }
   }, [])
+
+  useEffect(() => {
+    if (workflowState !== 'monitoring' || !cameraReady || isAnalyzing) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void captureAndAnalyze()
+    }, 650)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [workflowState, cameraReady, isAnalyzing, precisionMode])
+
+  useEffect(() => {
+    if (workflowState !== 'monitoring' || isAnalyzing) {
+      return
+    }
+
+    if (unsupportedDenomination) {
+      setProcessMessage(`Se detectó un corte no admitido (${unsupportedDenomination} Bs).`)
+      setWorkflowState('completed')
+      return
+    }
+
+    if (serialDetected && !isSerieB) {
+      setProcessMessage('Billete detectado, pero no corresponde a Serie B.')
+      setWorkflowState('completed')
+      return
+    }
+
+    if (isSerieB) {
+      if (!finalDenomination) {
+        setProcessMessage('Serie B detectada, pero no se pudo determinar el corte con confianza.')
+        setWorkflowState('completed')
+        return
+      }
+
+      setManualCorrection(finalDenomination)
+      setProcessMessage('Serie B detectada. Confirma el corte estimado para continuar.')
+      setWorkflowState('awaiting-confirmation')
+    }
+  }, [
+    workflowState,
+    isAnalyzing,
+    unsupportedDenomination,
+    serialDetected,
+    isSerieB,
+    finalDenomination,
+  ])
 
   useEffect(() => {
     try {
@@ -760,6 +1005,30 @@ function App() {
       return
     }
   }, [hasAcceptedTerms])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CAMERA_CONSENT_STORAGE_KEY, String(hasCameraConsent))
+    } catch {
+      return
+    }
+  }, [hasCameraConsent])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ONBOARDING_DONE_STORAGE_KEY, String(hasEnteredApp))
+    } catch {
+      return
+    }
+  }, [hasEnteredApp])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(calibration))
+    } catch {
+      return
+    }
+  }, [calibration])
 
   useEffect(() => {
     if (!isTermsModalOpen) {
@@ -784,6 +1053,11 @@ function App() {
     ? 'Cámara activa. Alinea el número dentro del recuadro.'
     : 'Cámara detenida. Puedes iniciar cámara o usar una foto.'
   const termsFileUrl = `${import.meta.env.BASE_URL}terms-and-conditions.md`
+  const isCalibrationReady = {
+    Bs10: calibration.consecutiveCorrect.Bs10 >= 2,
+    Bs20: calibration.consecutiveCorrect.Bs20 >= 2,
+    Bs50: calibration.consecutiveCorrect.Bs50 >= 2,
+  }
   const hasAnyResult =
     Boolean(serialDetected) ||
     Boolean(denomination) ||
@@ -809,11 +1083,15 @@ function App() {
             />
             He leído y acepto los Términos y Condiciones.
           </label>
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => setIsTermsModalOpen(true)}
-          >
+          <label>
+            <input
+              type="checkbox"
+              checked={hasCameraConsent}
+              onChange={(event) => setHasCameraConsent(event.target.checked)}
+            />
+            Acepto el uso de cámara para análisis.
+          </label>
+          <button type="button" className="text-button" onClick={() => setIsTermsModalOpen(true)}>
             Leer términos (modal)
           </button>
         </div>
@@ -826,6 +1104,15 @@ function App() {
             {cameraReady ? 'Cámara activa' : 'Cámara inactiva'}
           </span>
           <span className="chip neutral">Modo OCR: {precisionMode === 'high' ? 'Alta precisión' : 'Rápido'}</span>
+          <span className={isCalibrationReady.Bs10 ? 'chip ok' : 'chip warn'}>
+            Calibración Bs10: {isCalibrationReady.Bs10 ? 'Lista' : `${calibration.consecutiveCorrect.Bs10}/2`}
+          </span>
+          <span className={isCalibrationReady.Bs20 ? 'chip ok' : 'chip warn'}>
+            Calibración Bs20: {isCalibrationReady.Bs20 ? 'Lista' : `${calibration.consecutiveCorrect.Bs20}/2`}
+          </span>
+          <span className={isCalibrationReady.Bs50 ? 'chip ok' : 'chip warn'}>
+            Calibración Bs50: {isCalibrationReady.Bs50 ? 'Lista' : `${calibration.consecutiveCorrect.Bs50}/2`}
+          </span>
         </div>
       </header>
 
@@ -878,21 +1165,36 @@ function App() {
 
           {!cameraReady ? (
             <>
-              <button onClick={startCamera} disabled={!hasAcceptedTerms}>
+              <button onClick={startCamera} disabled={!hasAcceptedTerms || !hasCameraConsent}>
                 Iniciar cámara
               </button>
               <button
                 onClick={openGalleryPicker}
                 className="secondary"
-                disabled={isAnalyzing || !hasAcceptedTerms}
+                disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
               >
                 Usar foto de galería
               </button>
             </>
           ) : (
             <>
-              <button onClick={captureAndAnalyze} disabled={isAnalyzing || !hasAcceptedTerms}>
-                {isAnalyzing ? `Analizando... ${progress}%` : 'Tomar foto y validar'}
+              <button
+                onClick={startMonitoring}
+                disabled={
+                  isAnalyzing ||
+                  !hasAcceptedTerms ||
+                  !hasCameraConsent ||
+                  workflowState === 'monitoring'
+                }
+              >
+                {workflowState === 'monitoring' ? `Monitoreando... ${progress}%` : 'Iniciar monitoreo automático'}
+              </button>
+              <button
+                onClick={stopMonitoring}
+                className="secondary"
+                disabled={workflowState !== 'monitoring'}
+              >
+                Detener monitoreo
               </button>
               <button onClick={stopCamera} className="secondary">
                 Detener cámara
@@ -900,7 +1202,7 @@ function App() {
               <button
                 onClick={openGalleryPicker}
                 className="secondary"
-                disabled={isAnalyzing || !hasAcceptedTerms}
+                disabled={isAnalyzing || !hasAcceptedTerms || !hasCameraConsent}
               >
                 Usar foto de galería
               </button>
@@ -916,6 +1218,39 @@ function App() {
             <div className="progress-track" aria-hidden="true">
               <div className="progress-fill" style={{ width: `${progress}%` }} />
             </div>
+          </div>
+        )}
+
+        {processMessage && <p className="process-message">{processMessage}</p>}
+
+        {workflowState === 'awaiting-confirmation' && finalDenomination && (
+          <div className="confirm-box">
+            <h3>Confirmar corte detectado</h3>
+            <p>
+              Se detectó Serie B con corte estimado <strong>{finalDenomination}</strong>. ¿Es
+              correcto?
+            </p>
+
+            <div className="confirm-actions">
+              <button type="button" onClick={() => handleConfirmDenomination(true)}>
+                Sí, es correcto
+              </button>
+              <button type="button" className="secondary" onClick={() => handleConfirmDenomination(false)}>
+                No, corregir
+              </button>
+            </div>
+
+            <label className="correction-label">
+              Si no es correcto, selecciona el corte real:
+              <select
+                value={manualCorrection}
+                onChange={(event) => setManualCorrection(event.target.value as Denomination)}
+              >
+                <option value="Bs10">Bs10</option>
+                <option value="Bs20">Bs20</option>
+                <option value="Bs50">Bs50</option>
+              </select>
+            </label>
           </div>
         )}
       </section>
@@ -953,6 +1288,13 @@ function App() {
         </div>
 
         <p className={isInvalidBill ? 'status-bad' : 'status-ok'}>{statusText}</p>
+
+        {confirmedDenomination && isLegalBill !== null && (
+          <p className={isLegalBill ? 'status-ok' : 'status-bad'}>
+            Validación final: {confirmedDenomination} Serie B{' '}
+            {isLegalBill ? 'legal (fuera de rangos)' : 'sin valor legal (dentro de rangos)'}.
+          </p>
+        )}
 
         <div className="result-actions">
           <button
@@ -994,6 +1336,55 @@ function App() {
             <div className="modal-actions">
               <button type="button" onClick={() => setIsTermsModalOpen(false)}>
                 Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasEnteredApp && (
+        <div className="modal-overlay" onClick={() => undefined}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Bienvenida">
+            <h2>Bienvenido a Validador de Billetes Serie B</h2>
+            <p>
+              Esta app detecta Serie B, estima el corte (10, 20 o 50) y valida si el serial
+              cae dentro de rangos publicados.
+            </p>
+
+            <label className="welcome-check">
+              <input
+                type="checkbox"
+                checked={hasAcceptedTerms}
+                onChange={(event) => setHasAcceptedTerms(event.target.checked)}
+              />
+              Acepto Términos y Condiciones.
+            </label>
+
+            <label className="welcome-check">
+              <input
+                type="checkbox"
+                checked={hasCameraConsent}
+                onChange={(event) => setHasCameraConsent(event.target.checked)}
+              />
+              Acepto el uso de la cámara.
+            </label>
+
+            <button type="button" className="text-button" onClick={() => setIsTermsModalOpen(true)}>
+              Leer términos completos
+            </button>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                disabled={!hasAcceptedTerms || !hasCameraConsent}
+                onClick={async () => {
+                  setHasEnteredApp(true)
+                  await startCamera()
+                  setWorkflowState('monitoring')
+                  setProcessMessage('Monitoreo automático activo. Presenta un billete frente a la cámara.')
+                }}
+              >
+                Ingresar
               </button>
             </div>
           </div>

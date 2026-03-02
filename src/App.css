@@ -231,6 +231,12 @@ button.text-button {
   justify-content: flex-end;
 }
 
+.welcome-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .error {
   margin-top: 0.75rem;
   color: #b42318;
@@ -253,6 +259,16 @@ button.text-button {
   font-weight: 600;
 }
 
+.process-message {
+  margin: 0.75rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  background: #f6f8fa;
+  color: #334155;
+  font-weight: 600;
+}
+
 .progress-track {
   height: 8px;
   border-radius: 999px;
@@ -264,6 +280,40 @@ button.text-button {
   height: 100%;
   background: #1f6feb;
   transition: width 200ms ease;
+}
+
+.confirm-box {
+  margin-top: 0.75rem;
+  border: 1px solid #d8dee4;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.confirm-box h3,
+.confirm-box p {
+  margin: 0;
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.correction-label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.92rem;
+}
+
+.correction-label select {
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid #c9d1d9;
+  font: inherit;
 }
 
 .result-grid {
