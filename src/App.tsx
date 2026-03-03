@@ -121,6 +121,10 @@ function normalizeOcrToken(value: string): string {
     .replace(/\D/g, '')
 }
 
+function normalizeManualSerialInput(value: string): string {
+  return value.replace(/\D/g, '').slice(0, 9)
+}
+
 function extractSerialCandidates(text: string): string[] {
   const normalizedText = text.toUpperCase()
   const broadMatches = normalizedText.match(/[0-9OQDILZSB][0-9OQDILZSB\s.,-]{6,16}[0-9OQDILZSB]/g) ?? []
@@ -506,6 +510,8 @@ function App() {
   const [confirmedDenomination, setConfirmedDenomination] = useState<Denomination | null>(null)
   const [isLegalBill, setIsLegalBill] = useState<boolean | null>(null)
   const [manualCorrection, setManualCorrection] = useState<Denomination>('Bs10')
+  const [manualSerialInput, setManualSerialInput] = useState('')
+  const [manualDenomination, setManualDenomination] = useState<Denomination>('Bs10')
   const [calibration, setCalibration] = useState<CalibrationState>(() => {
     try {
       const saved = localStorage.getItem(CALIBRATION_STORAGE_KEY)
@@ -595,6 +601,8 @@ function App() {
     setProcessMessage('')
     setConfirmedDenomination(null)
     setIsLegalBill(null)
+    setManualSerialInput('')
+    setManualDenomination('Bs10')
     setProgress(0)
     setWorkflowState(cameraReady ? 'idle' : 'idle')
   }
@@ -933,6 +941,41 @@ function App() {
     )
   }
 
+  const handleManualValidation = () => {
+    const sanitizedSerial = normalizeManualSerialInput(manualSerialInput)
+
+    if (sanitizedSerial.length < 8) {
+      setError('Ingresa un número de serie válido de 8 o 9 dígitos.')
+      return
+    }
+
+    setError('')
+    const serialNumber = Number(sanitizedSerial)
+    const validation = validateSerialInRanges(serialNumber)
+    const serialInRangeForCut = isSerialInDenominationRange(serialNumber, manualDenomination)
+    const legal = !serialInRangeForCut
+
+    setSerialDetected(sanitizedSerial)
+    setIsSerieB(true)
+    setDenomination(validation.denomination)
+    setInRange(validation.inRange)
+    setDenominationByText(null)
+    setDenominationByColor(null)
+    setColorConfidence(0)
+    setFinalDenomination(manualDenomination)
+    setFinalConfidence(1)
+    setUnsupportedDenomination(null)
+    setManualCorrection(manualDenomination)
+    setConfirmedDenomination(manualDenomination)
+    setIsLegalBill(legal)
+    setWorkflowState('completed')
+    setProcessMessage(
+      legal
+        ? `Validación manual: Billete ${manualDenomination} Serie B legal (fuera de rangos observados).`
+        : `Validación manual: Billete ${manualDenomination} Serie B sin valor legal (dentro de rangos observados).`,
+    )
+  }
+
   const handleConfirmDenomination = (isCorrect: boolean) => {
     if (!finalDenomination) {
       setProcessMessage('No hay corte estimado para confirmar. Intenta otra captura.')
@@ -1159,6 +1202,10 @@ function App() {
     : 'CORTE PENDIENTE'
   const legalChipText =
     isLegalBill === null ? 'LEGALIDAD PENDIENTE' : isLegalBill ? 'LEGAL' : 'SIN VALOR LEGAL'
+  const legalChipClass =
+    isLegalBill === null ? 'hud-chip warn' : isLegalBill ? 'hud-chip ok' : 'hud-chip bad'
+  const processMessageClass =
+    isLegalBill === null ? 'process-message warning' : isLegalBill ? 'process-message legal' : 'process-message illegal'
   const currentYear = new Date().getFullYear()
 
   return (
@@ -1173,7 +1220,7 @@ function App() {
           <div className={`retro-hud ${isHudDimmed ? 'is-dimmed' : ''}`} aria-live="polite">
             <span className={isSerieB ? 'hud-chip bad' : 'hud-chip neutral'}>{serieChipText}</span>
             <span className="hud-chip neutral">{denominationChipText}</span>
-            <span className={isLegalBill === false ? 'hud-chip bad' : 'hud-chip ok'}>{legalChipText}</span>
+            <span className={legalChipClass}>{legalChipText}</span>
             <span className={cameraReady ? 'hud-chip ok' : 'hud-chip warn'}>
               {cameraReady ? 'CAM ON' : 'CAM OFF'}
             </span>
@@ -1268,7 +1315,7 @@ function App() {
           </div>
         )}
 
-        {processMessage && <p className="process-message">{processMessage}</p>}
+        {processMessage && <p className={processMessageClass}>{processMessage}</p>}
 
         <details
           className="analysis-details"
@@ -1301,6 +1348,44 @@ function App() {
             {confirmedDenomination && <span className="hud-chip ok">CONFIRMADO {confirmedDenomination}</span>}
           </div>
         </details>
+
+        <div className="manual-entry">
+          <h3>Ingreso manual</h3>
+          <p>Si no se detecta bien por cámara, ingresa el número de serie y el corte.</p>
+          <div className="manual-entry-grid">
+            <label className="manual-field">
+              Número de serie
+              <input
+                type="text"
+                inputMode="numeric"
+                value={manualSerialInput}
+                onChange={(event) => setManualSerialInput(normalizeManualSerialInput(event.target.value))}
+                placeholder="Ej. 12345678"
+                maxLength={9}
+              />
+            </label>
+
+            <label className="manual-field">
+              Corte del billete
+              <select
+                value={manualDenomination}
+                onChange={(event) => setManualDenomination(event.target.value as Denomination)}
+              >
+                <option value="Bs10">Bs10</option>
+                <option value="Bs20">Bs20</option>
+                <option value="Bs50">Bs50</option>
+              </select>
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleManualValidation}
+            disabled={isAnalyzing}
+          >
+            Validar manualmente
+          </button>
+        </div>
 
         {workflowState === 'awaiting-confirmation' && finalDenomination && (
           <div className="confirm-box">

@@ -341,6 +341,24 @@ button.camera-control .control-icon {
   font-weight: 600;
 }
 
+.process-message.legal {
+  border-color: #86efac;
+  background: #dcfce7;
+  color: #166534;
+}
+
+.process-message.illegal {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.process-message.warning {
+  border-color: #fcd34d;
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .analysis-details {
   margin-top: 0.65rem;
   border: 1px solid #d8dee4;
@@ -374,6 +392,44 @@ button.camera-control .control-icon {
   display: flex;
   flex-wrap: wrap;
   gap: 0.38rem;
+}
+
+.manual-entry {
+  margin-top: 0.75rem;
+  border: 1px solid #d8dee4;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.manual-entry h3,
+.manual-entry p {
+  margin: 0;
+}
+
+.manual-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.manual-field {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.manual-field input,
+.manual-field select {
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid #c9d1d9;
+  font: inherit;
+  background: #fff;
 }
 
 .confirm-box {
@@ -516,5 +572,9 @@ button.camera-control .control-icon {
     align-items: flex-start;
     flex-direction: column;
     gap: 0.3rem;
+  }
+
+  .manual-entry-grid {
+    grid-template-columns: 1fr;
   }
 }
